@@ -428,13 +428,13 @@ def make_quickcut_20s(
             f"{base}trim=start=0:end=2.5,setpts=PTS-STARTPTS,"
             f"scale={width}:{height}:force_original_aspect_ratio=increase,"
             f"crop={width}:{height}:"
-            f"(iw-ow)/2:(ih-oh)/2,{a}"
+            f"(iw-ow)/2:(ih-oh)/2,[{a}]"
         )
         filters.append(
             f"{base}trim=start=2.5:end=5,setpts=PTS-STARTPTS,"
             f"scale=810:1440:force_original_aspect_ratio=increase,"
             f"crop={width}:{height}:"
-            f"(iw-ow)/2+40:(ih-oh)/2-20,{b}"
+            f"(iw-ow)/2+40:(ih-oh)/2-20,[{b}]"
         )
         labels.extend([a, b])
 
