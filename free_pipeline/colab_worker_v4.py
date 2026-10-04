@@ -191,11 +191,22 @@ def update_row(row_number: int, updates: dict[str, Any]) -> None:
         ).execute()
 
 
-def build_ugc_prompt(job: dict[str, Any]) -> str:
+def build_ugc_prompt(job: dict[str, Any], continuation: bool = False) -> str:
     product = job.get("product", "the product")
     icp = job.get("icp", "a natural everyday customer")
     features = job.get("product_features", "")
     setting = job.get("video_setting", "a realistic everyday environment")
+
+    continuation_block = ""
+    if continuation:
+        continuation_block = """
+CONTINUATION:
+This is the second shot of the same UGC video.
+Continue naturally from the exact starting frame.
+Keep the same adult creator, wardrobe, product, location, lighting and camera style.
+Do not reset the scene or introduce a new character.
+Make one additional natural action with the product and keep the motion continuous.
+""".strip()
 
     return f"""
 Create a short vertical UGC product advertisement.
@@ -221,94 +232,9 @@ natural skin texture, everyday environment, one simple action with the product.
 The creator looks into the camera and briefly demonstrates the product instead of delivering a polished commercial.
 Avoid studio lighting, subtitles, UI elements, watermarks, extra products, distorted hands and visible phone hardware.
 Do not invent claims beyond the information supplied above.
+
+{continuation_block}
 """.strip()
-
-
-def install_wangp() -> None:
-    if WAN_DIR.exists():
-        return
-
-    subprocess.run(
-        [
-            "git",
-            "clone",
-            "--depth",
-            "1",
-            "https://github.com/deepbeepmeep/Wan2GP.git",
-            str(WAN_DIR),
-        ],
-        check=True,
-    )
-
-    subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pip",
-            "install",
-            "-q",
-            "-r",
-            str(WAN_DIR / "requirements.txt"),
-        ],
-        check=True,
-    )
-
-
-def make_wangp_session():
-    install_wangp()
-    if str(WAN_DIR) not in sys.path:
-        sys.path.insert(0, str(WAN_DIR))
-
-    from shared.api import init  # type: ignore
-
-    return init(
-        root=WAN_DIR,
-        cli_args=["--attention", "sdpa", "--profile", "4"],
-        console_output=True,
-    )
-
-
-def choose_wan_model(session) -> str:
-    models = session.list_model_metadata(
-        main_output="video",
-        inputs="image",
-        include_availability=True,
-    )
-
-    candidates = []
-    for model in models:
-        text = json.dumps(model).lower()
-        if "wan" not in text:
-            continue
-        if "5b" not in text:
-            continue
-        if "22" not in text and "2.2" not in text:
-            continue
-        candidates.append(model)
-
-    def score(model):
-        text = json.dumps(model).lower()
-        score_value = 0
-        if "fastwan" in text:
-            score_value += 100
-        if "ti2v" in text:
-            score_value += 50
-        if model.get("availability") == "available":
-            score_value += 20
-        return score_value
-
-    candidates.sort(key=score, reverse=True)
-
-    if not candidates:
-        raise RuntimeError(
-            "No Wan 2.2 5B image-capable model was found. "
-            "Print session.list_model_metadata(main_output='video', inputs='image') "
-            "to inspect the current catalogue."
-        )
-
-    selected = candidates[0]
-    print("Selected model:", selected.get("model_type"))
-    return str(selected["model_type"])
 
 
 def prepare_vertical_reference(image_path: Path) -> Image.Image:
@@ -316,7 +242,6 @@ def prepare_vertical_reference(image_path: Path) -> Image.Image:
     img = Image.open(image_path).convert("RGB")
     target_w, target_h = 480, 832
 
-    # Blurred full-frame background plus a contained sharp foreground.
     bg = ImageOps.fit(
         img,
         (target_w, target_h),
@@ -335,6 +260,90 @@ def prepare_vertical_reference(image_path: Path) -> Image.Image:
     y = (target_h - fg.height) // 2
     canvas.paste(fg, (x, y))
     return canvas
+
+
+def generate_segment(
+    session,
+    job: dict[str, Any],
+    image_path: Path,
+    continuation: bool = False,
+) -> Path:
+    model_type = choose_wan_model(session)
+    settings = session.get_default_settings(model_type)
+
+    pil_image = prepare_vertical_reference(image_path)
+
+    settings.update({
+        "model_type": model_type,
+        "image_mode": 0,
+        "prompt": build_ugc_prompt(job, continuation=continuation),
+        "image_prompt_type": "S",
+        "image_start": [(pil_image, None)],
+        "resolution": "480x832",
+        # FastWan TI2V uses 121 frames; at 24 fps this is ~5.04 seconds.
+        "video_length": 121,
+        "force_fps": "24",
+        "repeat_generation": 1,
+        "seed": -1,
+        "prompt_enhancer": "",
+        "multi_prompts_gen_type": "FG",
+    })
+
+    job_handle = session.submit_task(settings)
+    result = job_handle.result()
+
+    if not result.success:
+        messages = [getattr(err, "message", str(err)) for err in result.errors]
+        raise RuntimeError("Wan2GP generation failed: " + " | ".join(messages))
+
+    files = list(result.generated_files or [])
+    if not files:
+        raise RuntimeError("Wan2GP finished without a generated file.")
+
+    return Path(files[0])
+
+
+def extract_last_frame(video_path: Path, frame_path: Path) -> Path:
+    cmd = [
+        "ffmpeg", "-y",
+        "-sseof", "-0.05",
+        "-i", str(video_path),
+        "-frames:v", "1",
+        "-q:v", "2",
+        str(frame_path),
+    ]
+    subprocess.run(cmd, check=True, capture_output=True, text=True)
+    return frame_path
+
+
+def concatenate_vertical_clips(
+    first_path: Path,
+    second_path: Path,
+    output_path: Path,
+) -> Path:
+    # Trim a tiny overlap from shot 2 because its first frame was conditioned
+    # on the final frame of shot 1.
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", str(first_path),
+        "-i", str(second_path),
+        "-filter_complex",
+        (
+            "[1:v]trim=start=0.15,setpts=PTS-STARTPTS[v1];"
+            "[0:v][v1]concat=n=2:v=1:a=0,"
+            "scale=480:832:force_original_aspect_ratio=decrease,"
+            "pad=480:832:(ow-iw)/2:(oh-ih)/2,"
+            "setsar=1,setdar=9/16"
+        ),
+        "-r", "24",
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-crf", "23",
+        "-movflags", "+faststart",
+        str(output_path),
+    ]
+    subprocess.run(cmd, check=True, capture_output=True, text=True)
+    return output_path
 
 
 def make_final_vertical(
@@ -365,44 +374,6 @@ def make_final_vertical(
     subprocess.run(cmd, check=True, capture_output=True, text=True)
     return output_path
 
-
-def generate_video(session, job: dict[str, Any], image_path: Path) -> Path:
-    model_type = choose_wan_model(session)
-    settings = session.get_default_settings(model_type)
-
-    # Wan2GP's current direct API expects Gradio-style image entries:
-    # the first tuple item must be a PIL Image, not a filesystem path string.
-    pil_image = prepare_vertical_reference(image_path)
-
-    settings.update({
-        "model_type": model_type,
-        "image_mode": 0,
-        "prompt": build_ugc_prompt(job),
-        "image_prompt_type": "S",
-        "image_start": [(pil_image, None)],
-        "resolution": "480x832",
-        "video_length": "6s",
-        "force_fps": "24",
-        "repeat_generation": 1,
-        "seed": -1,
-        "prompt_enhancer": "",
-        "multi_prompts_gen_type": "FG",
-    })
-
-    job_handle = session.submit_task(settings)
-    result = job_handle.result()
-
-    if not result.success:
-        messages = [getattr(err, "message", str(err)) for err in result.errors]
-        raise RuntimeError("Wan2GP generation failed: " + " | ".join(messages))
-
-    files = list(result.generated_files or [])
-    if not files:
-        raise RuntimeError("Wan2GP finished without a generated file.")
-
-    return Path(files[0])
-
-
 def safe_name(value: str) -> str:
     value = re.sub(r"[^a-zA-Z0-9._-]+", "_", value).strip("_")
     return value[:80] or "ugc"
@@ -424,20 +395,33 @@ def process_job(job_file: dict[str, Any], session) -> None:
 
     try:
         download_product_image(str(job["product_photo"]), input_image)
-        generated = generate_video(session, job, input_image)
+        first = generate_segment(session, job, input_image, continuation=False)
+
+        first_path = OUTPUT_DIR / f"seg1_{job_id}.mp4"
+        if first.resolve() != first_path.resolve():
+            shutil.copy2(first, first_path)
+
+        last_frame = INPUT_DIR / f"{job_id}_last_frame.jpg"
+        extract_last_frame(first_path, last_frame)
+
+        second = generate_segment(session, job, last_frame, continuation=True)
+
+        second_path = OUTPUT_DIR / f"seg2_{job_id}.mp4"
+        if second.resolve() != second_path.resolve():
+            shutil.copy2(second, second_path)
 
         raw_path = OUTPUT_DIR / f"raw_{output_name}"
-        if generated.resolve() != raw_path.resolve():
-            shutil.copy2(generated, raw_path)
+        concatenate_vertical_clips(first_path, second_path, raw_path)
 
         final_path = OUTPUT_DIR / output_name
         make_final_vertical(raw_path, final_path)
 
         drive_file = upload_video(final_path, OUTPUT_FOLDER_ID, output_name)
-        try:
-            raw_path.unlink(missing_ok=True)
-        except Exception:
-            pass
+        for temp_path in (first_path, second_path, raw_path, last_frame):
+            try:
+                temp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
 
         update_row(row, {
             "Status": "FINISHED",
