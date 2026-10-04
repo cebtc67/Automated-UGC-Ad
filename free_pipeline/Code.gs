@@ -90,7 +90,21 @@ function installedOnEdit(e) {
     const status = String(e.value || '').trim().toUpperCase();
     if (status !== CFG.READY_STATUS) return;
 
-    createJobForRow_(sheet, e.range.getRow());
+    const row = e.range.getRow();
+    const headers = getHeaders_(sheet);
+    const jobIdCol = headers.indexOf('Job ID') + 1;
+    const statusCol = headers.indexOf('Status') + 1;
+    const currentJobId = jobIdCol ? String(sheet.getRange(row, jobIdCol).getValue() || '').trim() : '';
+    const currentStatus = statusCol ? String(sheet.getRange(row, statusCol).getValue() || '').trim().toUpperCase() : '';
+
+    // READY on a previously failed/finished row starts a fresh job.
+    if (currentJobId && currentStatus === CFG.READY_STATUS) {
+      sheet.getRange(row, jobIdCol).clearContent();
+      const finishedCol = headers.indexOf('Finished Video') + 1;
+      if (finishedCol) sheet.getRange(row, finishedCol).clearContent();
+    }
+
+    createJobForRow_(sheet, row);
   } catch (err) {
     console.error(err);
   }
