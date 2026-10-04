@@ -27,8 +27,9 @@ function onOpen() {
     .createMenu('UGC Automation')
     .addItem('1. Setup / Repair', 'setup')
     .addItem('2. Queue selected row', 'queueSelectedRow')
-    .addItem('3. Retry selected row', 'retrySelectedRow')
-    .addItem('4. Show configuration', 'showConfig')
+    .addItem('3. Queue first READY row', 'queueFirstReadyRow')
+    .addItem('4. Retry selected row', 'retrySelectedRow')
+    .addItem('5. Show configuration', 'showConfig')
     .addToUi();
 }
 
@@ -116,7 +117,36 @@ function queueSelectedRow() {
     SpreadsheetApp.getUi().alert('Selecciona primero una fila en la hoja Videos.');
     return;
   }
-  createJobForRow_(sheet, sheet.getActiveRange().getRow());
+  const row = sheet.getActiveRange().getRow();
+  if (row < 2) return;
+  const headers = getHeaders_(sheet);
+  const jobCol = headers.indexOf('Job ID') + 1;
+  const finishedCol = headers.indexOf('Finished Video') + 1;
+  if (jobCol) sheet.getRange(row, jobCol).clearContent();
+  if (finishedCol) sheet.getRange(row, finishedCol).clearContent();
+  setCellByHeader_(sheet, row, 'Status', CFG.READY_STATUS);
+  createJobForRow_(sheet, row);
+}
+
+function queueFirstReadyRow() {
+  const sheet = SpreadsheetApp.getActive().getSheetByName(CFG.VIDEO_SHEET);
+  if (!sheet) throw new Error('Videos sheet does not exist. Run setup() first.');
+  const headers = getHeaders_(sheet);
+  const statusCol = headers.indexOf('Status') + 1;
+  if (!statusCol) throw new Error('Status header not found.');
+  const lastRow = sheet.getLastRow();
+  for (let row = 2; row <= lastRow; row++) {
+    const status = String(sheet.getRange(row, statusCol).getValue() || '').trim().toUpperCase();
+    if (status === CFG.READY_STATUS) {
+      const jobCol = headers.indexOf('Job ID') + 1;
+      const finishedCol = headers.indexOf('Finished Video') + 1;
+      if (jobCol) sheet.getRange(row, jobCol).clearContent();
+      if (finishedCol) sheet.getRange(row, finishedCol).clearContent();
+      createJobForRow_(sheet, row);
+      return;
+    }
+  }
+  throw new Error('No READY row found in Videos.');
 }
 
 function retrySelectedRow() {
