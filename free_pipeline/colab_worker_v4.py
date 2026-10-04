@@ -315,14 +315,15 @@ def generate_video(session, job: dict[str, Any], image_path: Path) -> Path:
     model_type = choose_wan_model(session)
     settings = session.get_default_settings(model_type)
 
+    # Wan2GP's current direct API expects Gradio-style image entries:
+    # the first tuple item must be a PIL Image, not a filesystem path string.
+    pil_image = Image.open(image_path).convert("RGB").copy()
+
     settings.update({
         "model_type": model_type,
         "image_mode": 0,
         "prompt": build_ugc_prompt(job),
         "image_prompt_type": "S",
-        # Wan2GP's current direct API expects Gradio-style image entries
-        # (PIL image in the first tuple position), not a filesystem path string.
-        pil_image = Image.open(image_path).convert("RGB").copy()
         "image_start": [(pil_image, None)],
         "resolution": "480x832",
         "video_length": 97,
