@@ -191,6 +191,92 @@ def update_row(row_number: int, updates: dict[str, Any]) -> None:
         ).execute()
 
 
+def install_wangp() -> None:
+    if WAN_DIR.exists():
+        return
+
+    subprocess.run(
+        [
+            "git",
+            "clone",
+            "--depth",
+            "1",
+            "https://github.com/deepbeepmeep/Wan2GP.git",
+            str(WAN_DIR),
+        ],
+        check=True,
+    )
+
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "-q",
+            "-r",
+            str(WAN_DIR / "requirements.txt"),
+        ],
+        check=True,
+    )
+
+
+def make_wangp_session():
+    install_wangp()
+    if str(WAN_DIR) not in sys.path:
+        sys.path.insert(0, str(WAN_DIR))
+
+    from shared.api import init  # type: ignore
+
+    return init(
+        root=WAN_DIR,
+        cli_args=["--attention", "sdpa", "--profile", "4"],
+        console_output=True,
+    )
+
+
+def choose_wan_model(session) -> str:
+    models = session.list_model_metadata(
+        main_output="video",
+        inputs="image",
+        include_availability=True,
+    )
+
+    candidates = []
+    for model in models:
+        text_blob = json.dumps(model).lower()
+        if "wan" not in text_blob:
+            continue
+        if "5b" not in text_blob:
+            continue
+        if "22" not in text_blob and "2.2" not in text_blob:
+            continue
+        candidates.append(model)
+
+    def score(model):
+        text_blob = json.dumps(model).lower()
+        score_value = 0
+        if "fastwan" in text_blob:
+            score_value += 100
+        if "ti2v" in text_blob:
+            score_value += 50
+        if model.get("availability") == "available":
+            score_value += 20
+        return score_value
+
+    candidates.sort(key=score, reverse=True)
+
+    if not candidates:
+        raise RuntimeError(
+            "No Wan 2.2 5B image-capable model was found. "
+            "Inspect session.list_model_metadata(main_output='video', inputs='image')."
+        )
+
+    selected = candidates[0]
+    print("Selected model:", selected.get("model_type"))
+    return str(selected["model_type"])
+
+
 def build_ugc_prompt(job: dict[str, Any], continuation: bool = False) -> str:
     product = job.get("product", "the product")
     icp = job.get("icp", "a natural everyday customer")
