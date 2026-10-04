@@ -18,6 +18,8 @@ import traceback
 from pathlib import Path
 from typing import Any
 
+from PIL import Image
+
 from google.auth import default
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
@@ -318,7 +320,10 @@ def generate_video(session, job: dict[str, Any], image_path: Path) -> Path:
         "image_mode": 0,
         "prompt": build_ugc_prompt(job),
         "image_prompt_type": "S",
-        "image_start": str(image_path),
+        # Wan2GP's current direct API expects Gradio-style image entries
+        # (PIL image in the first tuple position), not a filesystem path string.
+        pil_image = Image.open(image_path).convert("RGB").copy()
+        "image_start": [(pil_image, None)],
         "resolution": "480x832",
         "video_length": 97,
         "force_fps": "24",
