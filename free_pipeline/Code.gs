@@ -117,6 +117,8 @@ function retrySelectedRow() {
 
   sheet.getRange(row, col['Status']).setValue(CFG.READY_STATUS);
   sheet.getRange(row, col['Error']).clearContent();
+  sheet.getRange(row, col['Job ID']).clearContent();
+  sheet.getRange(row, col['Finished Video']).clearContent();
   createJobForRow_(sheet, row);
 }
 
