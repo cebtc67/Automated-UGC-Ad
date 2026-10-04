@@ -18,7 +18,7 @@ import traceback
 from pathlib import Path
 from typing import Any
 
-from PIL import Image
+from PIL import Image, ImageFilter, ImageOps
 
 from google.auth import default
 from googleapiclient.discovery import build
@@ -311,13 +311,68 @@ def choose_wan_model(session) -> str:
     return str(selected["model_type"])
 
 
+def prepare_vertical_reference(image_path: Path) -> Image.Image:
+    """Build a 9:16 reference while keeping the whole product visible."""
+    img = Image.open(image_path).convert("RGB")
+    target_w, target_h = 480, 832
+
+    # Blurred full-frame background plus a contained sharp foreground.
+    bg = ImageOps.fit(
+        img,
+        (target_w, target_h),
+        method=Image.Resampling.LANCZOS,
+        centering=(0.5, 0.5),
+    ).filter(ImageFilter.GaussianBlur(radius=18))
+
+    fg = ImageOps.contain(
+        img,
+        (target_w - 32, target_h - 80),
+        method=Image.Resampling.LANCZOS,
+    )
+
+    canvas = bg.copy()
+    x = (target_w - fg.width) // 2
+    y = (target_h - fg.height) // 2
+    canvas.paste(fg, (x, y))
+    return canvas
+
+
+def make_final_vertical(
+    input_path: Path,
+    output_path: Path,
+    width: int = 480,
+    height: int = 832,
+) -> Path:
+    """Force the final MP4 to 9:16 while preserving the full frame."""
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", str(input_path),
+        "-vf",
+        (
+            f"split=2[bg][fg];"
+            f"[bg]scale={width}:{height},boxblur=20:2[blur];"
+            f"[fg]scale={width}:-2:force_original_aspect_ratio=decrease[small];"
+            f"[blur][small]overlay=(W-w)/2:(H-h)/2,"
+            "setsar=1,setdar=9/16"
+        ),
+        "-r", "24",
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-crf", "23",
+        "-movflags", "+faststart",
+        str(output_path),
+    ]
+    subprocess.run(cmd, check=True, capture_output=True, text=True)
+    return output_path
+
+
 def generate_video(session, job: dict[str, Any], image_path: Path) -> Path:
     model_type = choose_wan_model(session)
     settings = session.get_default_settings(model_type)
 
     # Wan2GP's current direct API expects Gradio-style image entries:
     # the first tuple item must be a PIL Image, not a filesystem path string.
-    pil_image = Image.open(image_path).convert("RGB").copy()
+    pil_image = prepare_vertical_reference(image_path)
 
     settings.update({
         "model_type": model_type,
@@ -326,7 +381,7 @@ def generate_video(session, job: dict[str, Any], image_path: Path) -> Path:
         "image_prompt_type": "S",
         "image_start": [(pil_image, None)],
         "resolution": "480x832",
-        "video_length": 97,
+        "video_length": "6s",
         "force_fps": "24",
         "repeat_generation": 1,
         "seed": -1,
@@ -371,11 +426,18 @@ def process_job(job_file: dict[str, Any], session) -> None:
         download_product_image(str(job["product_photo"]), input_image)
         generated = generate_video(session, job, input_image)
 
+        raw_path = OUTPUT_DIR / f"raw_{output_name}"
+        if generated.resolve() != raw_path.resolve():
+            shutil.copy2(generated, raw_path)
+
         final_path = OUTPUT_DIR / output_name
-        if generated.resolve() != final_path.resolve():
-            shutil.copy2(generated, final_path)
+        make_final_vertical(raw_path, final_path)
 
         drive_file = upload_video(final_path, OUTPUT_FOLDER_ID, output_name)
+        try:
+            raw_path.unlink(missing_ok=True)
+        except Exception:
+            pass
 
         update_row(row, {
             "Status": "FINISHED",
